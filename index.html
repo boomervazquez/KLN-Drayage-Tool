@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KLN Drayage Rate Tool . OSRM Only . Full List . ZIP Fix</title>
+<style>
+  :root{--bg:#f4f4f4;--card:#ffffff;--text:#1f2937;--muted:#6b7280;--gray:#575757;--orange:#f36f21;--ok:#10b981;--err:#ef4444}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{max-width:980px;margin:32px auto;padding:0 16px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+  .title{font-size:clamp(20px,3vw,28px);font-weight:800;color:var(--gray)}
+  .badge{padding:4px 10px;border-radius:999px;background:#fff7ed;color:var(--orange);border:1px solid #fed7aa;font-weight:700;font-size:12px}
+  .card{background:var(--card);border:1px solid #e5e7eb;border-radius:14px;padding:18px;box-shadow:0 10px 20px rgba(0,0,0,.04)}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(12,1fr)}
+  .col-3{grid-column:span 3}.col-4{grid-column:span 4}.col-5{grid-column:span 5}.col-6{grid-column:span 6}.col-12{grid-column:span 12}
+  @media(max-width:780px){.col-3,.col-4,.col-5,.col-6{grid-column:span 12}}
+  label{font-weight:600;color:var(--gray)}
+  input,select{width:100%;border:1px solid #d1d5db;border-radius:10px;padding:12px;font-size:15px;background:#fff}
+  input:focus,select:focus{border-color:var(--orange);outline:none}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .btn{background:var(--orange);color:#fff;border:none;border-radius:12px;padding:12px 16px;font-weight:700;cursor:pointer}
+  .btn.secondary{background:#fff;color:var(--orange);border:1px solid var(--orange)}
+  .mini{font-size:12px;color:var(--muted)}
+  .result{border-top:1px dashed #e5e7eb;margin-top:18px;padding-top:18px}
+  .stat{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #f1f5f9}
+  .stat:last-child{border-bottom:none}
+  .log{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:12px;background:#0b1020;color:#cbd5e1;padding:12px;border-radius:10px;max-height:260px;overflow:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="title">KLN Drayage Rate Tool</div>
+    <span class="badge" id="statusBadge">Idle</span>
+  </header>
+
+  <div class="card">
+    <div class="grid">
+      <div class="col-12 mini">Use ZIP or City + State . ZIP+4 is OK . we only use the first 5 digits</div>
+
+      <div class="col-5">
+        <label for="zip">Zip Code</label>
+        <input id="zip" placeholder="e.g., 94010 or 94010-1234" />
+        <div class="mini">Leave blank if using city and state</div>
+      </div>
+      <div class="col-4">
+        <label for="city">City</label>
+        <input id="city" placeholder="e.g., Burlingame" />
+      </div>
+      <div class="col-3">
+        <label for="state">State</label>
+        <input id="state" maxlength="2" placeholder="e.g., CA" />
+      </div>
+
+      <div class="col-12">
+        <label for="overrideSelect">Destination override . optional</label>
+        <select id="overrideSelect"></select>
+        <div class="mini">Default is Auto . nearest by driving distance</div>
+      </div>
+
+      <div class="col-12 row">
+        <button class="btn" id="calcBtn">Calculate Rate</button>
+        <button class="btn secondary" id="resetBtn">Reset</button>
+        <button class="btn secondary" id="copyBtn">Copy Summary</button>
+      </div>
+
+      <div class="col-12">
+        <div class="result" id="result" hidden>
+          <div class="stat"><span class="mini">Selected Facility</span><span id="rName">—</span></div>
+          <div class="stat"><span class="mini">Type</span><span id="rType">—</span></div>
+          <div class="stat"><span class="mini">One-way Distance . mi</span><span id="rMilesOne">—</span></div>
+          <div class="stat"><span class="mini">Round-trip Distance . mi</span><span id="rMilesRound">—</span></div>
+          <div class="stat"><span class="mini">Calculated Cost . USD</span><span id="rCost">—</span></div>
+        </div>
+      </div>
+
+      <div class="col-12">
+        <details>
+          <summary><strong>Diagnostics . click to expand</strong></summary>
+          <div class="log" id="log"></div>
+          <div class="mini">Routing . OSRM public demo server . Geocoding . Nominatim</div>
+          <div class="mini">Prefilter . top 12 by air distance . then route each to pick true nearest by road</div>
+          <div class="mini">Cost formula . <code>200 + 3 × roundTripMiles</code></div>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Utilities
+const $ = (id)=>document.getElementById(id);
+const logEl = $("log");
+const badge = $("statusBadge");
+const setBadge = (txt, cls)=>{ badge.textContent = txt; badge.style.color = cls || "var(--orange)"; };
+const log = (msg)=>{ logEl.textContent += msg + "\\n"; logEl.scrollTop = logEl.scrollHeight; };
+const round = (n,p=2)=>Number.parseFloat(n).toFixed(p);
+function assert(cond,msg){ if(!cond) throw new Error(msg); }
+function haversineMiles(a,b){
+  const R=3958.7613, toRad = d=>d*Math.PI/180;
+  const dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
+  const lat1=toRad(a.lat), lat2=toRad(b.lat);
+  const h=Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+// Data . Full Ports and IPI
+const DESTINATIONS = [
+  // West Coast . Ports
+  {name:"Port of Los Angeles", type:"PORT", lat:33.741, lon:-118.254},
+  {name:"Port of Long Beach", type:"PORT", lat:33.770, lon:-118.200},
+  {name:"Port of Oakland", type:"PORT", lat:37.795, lon:-122.279},
+  {name:"Port of Seattle", type:"PORT", lat:47.606, lon:-122.340},
+  {name:"Port of Tacoma", type:"PORT", lat:47.268, lon:-122.412},
+  {name:"Port of Portland OR", type:"PORT", lat:45.583, lon:-122.760},
+  {name:"Port of San Diego", type:"PORT", lat:32.697, lon:-117.173},
+
+  // Gulf and South Atlantic . Ports
+  {name:"Port Houston . Barbours Cut", type:"PORT", lat:29.626, lon:-95.016},
+  {name:"Port Houston . Bayport", type:"PORT", lat:29.602, lon:-95.020},
+  {name:"Port of New Orleans", type:"PORT", lat:29.941, lon:-90.060},
+  {name:"Port of Mobile", type:"PORT", lat:30.708, lon:-88.040},
+  {name:"Port Tampa Bay", type:"PORT", lat:27.905, lon:-82.439},
+  {name:"Port Everglades", type:"PORT", lat:26.088, lon:-80.116},
+  {name:"PortMiami", type:"PORT", lat:25.777, lon:-80.178},
+  {name:"JAXPORT . Jacksonville", type:"PORT", lat:30.389, lon:-81.529},
+  {name:"Port Canaveral", type:"PORT", lat:28.409, lon:-80.607},
+  {name:"Port of Savannah . Garden City", type:"PORT", lat:32.147, lon:-81.162},
+  {name:"Port of Charleston . Wando", type:"PORT", lat:32.857, lon:-79.937},
+  {name:"Port of Wilmington NC", type:"PORT", lat:34.224, lon:-77.949},
+
+  // Mid Atlantic . Northeast . Ports
+  {name:"Port of Virginia . Norfolk", type:"PORT", lat:36.946, lon:-76.329},
+  {name:"Port of Baltimore", type:"PORT", lat:39.267, lon:-76.558},
+  {name:"Port of NY . NJ . Newark/Elizabeth", type:"PORT", lat:40.676, lon:-74.150},
+  {name:"Port of Philadelphia . Packer Ave", type:"PORT", lat:39.909, lon:-75.142},
+  {name:"Port of Wilmington DE", type:"PORT", lat:39.729, lon:-75.516},
+  {name:"Port of Boston . Conley", type:"PORT", lat:42.339, lon:-71.026},
+  {name:"Portsmouth NH", type:"PORT", lat:43.078, lon:-70.741},
+
+  // Inland Rail . West and Mountain
+  {name:"BNSF . San Bernardino CA", type:"IPI", lat:34.093, lon:-117.313},
+  {name:"UP . LATC Los Angeles", type:"IPI", lat:34.040, lon:-118.233},
+  {name:"UP . City of Industry CA", type:"IPI", lat:34.034, lon:-117.988},
+  {name:"BNSF . Stockton CA", type:"IPI", lat:37.936, lon:-121.316},
+  {name:"UP . Oakland Global", type:"IPI", lat:37.798, lon:-122.312},
+  {name:"BNSF . Seattle SIG", type:"IPI", lat:47.548, lon:-122.323},
+  {name:"Tacoma South Intermodal", type:"IPI", lat:47.216, lon:-122.417},
+  {name:"UP . Salt Lake City", type:"IPI", lat:40.732, lon:-111.938},
+  {name:"BNSF . Denver CO", type:"IPI", lat:39.793, lon:-104.980},
+  {name:"UP . Phoenix AZ", type:"IPI", lat:33.412, lon:-112.074},
+  {name:"UP . Las Vegas NV", type:"IPI", lat:36.135, lon:-115.010},
+
+  // Inland Rail . Central and South
+  {name:"BNSF . Alliance TX . DFW", type:"IPI", lat:32.987, lon:-97.316},
+  {name:"UP . Dallas Global 4 . Wilmer", type:"IPI", lat:32.574, lon:-96.663},
+  {name:"UP . San Antonio", type:"IPI", lat:29.370, lon:-98.444},
+  {name:"UP . El Paso", type:"IPI", lat:31.760, lon:-106.410},
+  {name:"BNSF . Kansas City KS", type:"IPI", lat:39.107, lon:-94.657},
+  {name:"UP . Kansas City MO . Neff", type:"IPI", lat:39.099, lon:-94.541},
+  {name:"BNSF . St Louis MO", type:"IPI", lat:38.705, lon:-90.161},
+  {name:"UP . Omaha NE", type:"IPI", lat:41.213, lon:-95.955},
+  {name:"BNSF . Minneapolis MN", type:"IPI", lat:45.060, lon:-93.310},
+
+  // Inland Rail . East and Midwest
+  {name:"BNSF . Cicero IL . Chicago", type:"IPI", lat:41.839, lon:-87.763},
+  {name:"UP . Global 1 . Chicago", type:"IPI", lat:41.881, lon:-87.677},
+  {name:"UP . Global 2 . Northlake IL", type:"IPI", lat:41.913, lon:-87.900},
+  {name:"UP . Global 4 . Joliet IL", type:"IPI", lat:41.506, lon:-88.121},
+  {name:"CSX . Bedford Park IL", type:"IPI", lat:41.767, lon:-87.774},
+  {name:"NS . 47th Street Chicago", type:"IPI", lat:41.808, lon:-87.646},
+  {name:"NS . Landers Chicago", type:"IPI", lat:41.756, lon:-87.715},
+
+  {name:"CSX . Columbus OH", type:"IPI", lat:39.922, lon:-82.959},
+  {name:"NS . Columbus Rickenbacker", type:"IPI", lat:39.811, lon:-82.927},
+  {name:"CSX . Cincinnati OH", type:"IPI", lat:39.261, lon:-84.524},
+  {name:"CSX . Cleveland OH", type:"IPI", lat:41.484, lon:-81.686},
+  {name:"NS . Detroit MI", type:"IPI", lat:42.325, lon:-83.107},
+  {name:"CSX . Pittsburgh PA", type:"IPI", lat:40.444, lon:-79.995},
+  {name:"NS . Harrisburg PA", type:"IPI", lat:40.259, lon:-76.866},
+  {name:"CSX . Worcester MA", type:"IPI", lat:42.247, lon:-71.806},
+  {name:"NS . Ayer . Devens MA", type:"IPI", lat:42.561, lon:-71.590},
+  {name:"NS . Croxton NJ", type:"IPI", lat:40.751, lon:-74.058},
+  {name:"CSX . North Bergen NJ", type:"IPI", lat:40.767, lon:-74.038},
+  {name:"NS . Charlotte NC", type:"IPI", lat:35.240, lon:-80.825},
+  {name:"CSX . Rocky Mount NC", type:"IPI", lat:35.932, lon:-77.821},
+  {name:"NS . Atlanta GA", type:"IPI", lat:33.773, lon:-84.438},
+  {name:"CSX . Jacksonville FL", type:"IPI", lat:30.345, lon:-81.726},
+  {name:"CSX . Tampa FL", type:"IPI", lat:27.969, lon:-82.397},
+];
+
+// Geocode . Nominatim
+async function geocodeUS(query){
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, { headers: { "Accept":"application/json" } });
+  if(!res.ok) throw new Error(`Geocoding failed . HTTP ${res.status}`);
+  const data = await res.json();
+  const first = data?.[0];
+  if(!first) throw new Error("No geocoding results");
+  return { lat: parseFloat(first.lat), lon: parseFloat(first.lon), label: first.display_name || query };
+}
+
+// Route . OSRM public
+async function osrmMiles(from, to){
+  const url = `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`Routing failed . HTTP ${res.status}`);
+  const data = await res.json();
+  const meters = data?.routes?.[0]?.distance;
+  if(typeof meters !== "number") throw new Error("No driving distance returned");
+  return meters / 1609.344;
+}
+
+// Populate dropdown with grouping
+function populateOverride(){
+  const sel = $("overrideSelect");
+  sel.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = "auto";
+  auto.textContent = "Auto . nearest by road";
+  sel.appendChild(auto);
+
+  const sorted = [...DESTINATIONS].sort((a,b)=>{
+    if(a.type !== b.type) return a.type.localeCompare(b.type);
+    return a.name.localeCompare(b.name);
+  });
+
+  const groups = [
+    {label:"Ocean Ports", type:"PORT"},
+    {label:"IPI Rail Depots", type:"IPI"},
+  ];
+
+  for(const g of groups){
+    const og = document.createElement("optgroup");
+    og.label = g.label;
+    sorted.filter(d=>d.type===g.type).forEach(d=>{
+      const idx = DESTINATIONS.findIndex(x=>x.name===d.name && x.type===d.type && x.lat===d.lat && x.lon===d.lon);
+      const opt = document.createElement("option");
+      opt.value = String(idx);
+      opt.textContent = d.name;
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  }
+}
+
+// Render
+function renderResult(dest, oneWay, roundTrip, cost){
+  $("rName").textContent = dest.name;
+  $("rType").textContent = dest.type;
+  $("rMilesOne").textContent = round(oneWay,2);
+  $("rMilesRound").textContent = round(roundTrip,2);
+  $("rCost").textContent = `$${Number(round(cost,2)).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+  $("result").hidden = false;
+  setBadge("Done", "var(--ok)");
+}
+
+// Main calculate
+async function calculate(){
+  try{
+    setBadge("Working . geocoding", "var(--orange)");
+    $("result").hidden = true;
+    log("START");
+
+    // Validate origin . robust ZIP handling
+    const zipRaw = $("zip").value || "";
+    const zipDigits = zipRaw.replace(/\\D/g,""); // strip non-digits
+    const city = ($("city").value || "").trim();
+    const state = ($("state").value || "").trim().toUpperCase();
+
+    let query = "";
+    if(zipDigits.length){ // accept 5 or 9 . use first 5
+      if(zipDigits.length < 5){
+        throw new Error("Zip appears incomplete . need at least 5 digits");
+      }
+      query = zipDigits.slice(0,5);
+      log(`INPUT . ZIP normalized="${query}" from "${zipRaw}"`);
+    }else{
+      assert(city && /^[A-Za-z .'-]+$/.test(city), "City is required when no ZIP");
+      assert(state && /^[A-Z]{2}$/.test(state), "Use 2-letter state code");
+      query = `${city}, ${state}`;
+      log(`INPUT . origin by city/state="${query}"`);
+    }
+
+    // Geocode
+    const origin = await geocodeUS(query);
+    log(`GEOCODE . ${origin.label} -> ${origin.lat}, ${origin.lon}`);
+
+    // Override path
+    const overrideVal = $("overrideSelect").value;
+    if(overrideVal !== "auto"){
+      setBadge("Routing . override", "var(--orange)");
+      const idx = Number(overrideVal);
+      const dest = DESTINATIONS[idx];
+      assert(dest, "Invalid override selection");
+      const oneWay = await osrmMiles(origin, dest);
+      const roundTrip = oneWay * 2;
+      const cost = 200 + 3 * roundTrip;
+      renderResult(dest, oneWay, roundTrip, cost);
+      assert(oneWay > 0 && roundTrip > 0 && cost > 0, "Computed values are not positive");
+      log(`OVERRIDE . ${dest.name} (${dest.type}) . one-way ${round(oneWay)} mi`);
+      return;
+    }
+
+    // Auto mode . prefilter by air and route top 12
+    setBadge("Geocoded . finding candidates", "var(--orange)");
+    const withAir = DESTINATIONS.map(d=>({
+      ...d,
+      air: haversineMiles({lat:origin.lat, lon:origin.lon}, {lat:d.lat, lon:d.lon})
+    })).sort((a,b)=>a.air - b.air);
+    const shortlist = withAir.slice(0, 12);
+    log(`CANDIDATES . shortlisted ${shortlist.length} by air miles`);
+    assert(shortlist.length > 0, "No destinations available");
+
+    setBadge("Routing . computing", "var(--orange)");
+    const results = [];
+    for(const d of shortlist){
+      try{
+        const miles = await osrmMiles(origin, d);
+        results.push({ ...d, driveMiles: miles });
+      }catch(e){
+        log(`WARN . routing failed for ${d.name}`);
+      }
+    }
+    results.sort((a,b)=>a.driveMiles - b.driveMiles);
+    assert(results.length > 0, "No driving routes succeeded");
+
+    const best = results[0];
+    const oneWay = best.driveMiles;
+    const roundTrip = oneWay * 2;
+    const cost = 200 + 3 * roundTrip;
+    renderResult(best, oneWay, roundTrip, cost);
+    log(`BEST . ${best.name} (${best.type}) . one-way ${round(oneWay)} mi`);
+  }catch(err){
+    setBadge("Error", "var(--err)");
+    log(`ERROR . ${err.message}`);
+    alert(`Error . ${err.message}`);
+  }
+}
+
+// Events
+$("calcBtn").addEventListener("click", calculate);
+$("resetBtn").addEventListener("click", ()=>{
+  ["zip","city","state"].forEach(id=>$(id).value="");
+  $("overrideSelect").value = "auto";
+  $("result").hidden = true;
+  setBadge("Idle");
+});
+$("copyBtn").addEventListener("click", async ()=>{
+  const lines = [
+    `Facility: ${$("rName").textContent} (${ $("rType").textContent })`,
+    `One-way miles: ${$("rMilesOne").textContent}`,
+    `Round-trip miles: ${$("rMilesRound").textContent}`,
+    `Cost: ${$("rCost").textContent}`
+  ].join("\\n");
+  try{ await navigator.clipboard.writeText(lines); }catch{}
+});
+window.addEventListener("load", populateOverride);
+</script>
+</body>
+</html>
